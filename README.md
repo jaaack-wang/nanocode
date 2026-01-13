@@ -1,25 +1,31 @@
 # nanocode
 
-Minimal Claude Code alternatives, adapted from [this repo](https://github.com/1rgs/nanocode), which contains single Python file, zero dependencies, ~250 lines. The adapted version introduces 
+Minimal Claude Code alternatives, adapted from [this repo](https://github.com/1rgs/nanocode). Each script is a single Python file with zero external dependencies (~250-600 lines).
 
-Besides claude models the original codebase supports, the adaption adds supports to GPT models from OpenAI and open-weight models supported by [vllm](https://github.com/vllm-project/vllm/tree/main) hosted via OpenAI Chat Completions API. Below are demonstrations of the three types of models that come with this repo. 
+Besides Claude models the original codebase supports, the adaptation adds support for GPT models from OpenAI, Gemini models from Google, and open-weight models supported by [vllm](https://github.com/vllm-project/vllm/tree/main) hosted via OpenAI Chat Completions API. Below are demonstrations of the four types of models that come with this repo. 
 
 ![screenshot](screenshot.png)
+
+**Recommendation**: `nanocode_gemini.py` is recommended since `gemini-3-flash-preview` is currently [free of charge](https://ai.google.dev/gemini-api/docs/pricing#gemini-3-flash-preview) as of now and works incredibly well.
+
+![screenshot](gemini_example.png)
+
+
 
 ## Features
 
 - Full agentic loop with tool use
-- Tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`, `web_search`, and `web_get` (the web search tools are additionally introduced and they are **free** to use by leveraging duckduckgo search enginee)
+- Tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`, `web_search`, and `web_get` (the web search tools are additionally introduced and they are **free** to use by leveraging duckduckgo search engine)
 - Conversation history
-  - Additionally supports saving conversational history
+  - Automatically saved to `chat_history/` (can be disabled with `--not_save_history`)
 
 - Colored terminal output
-  - If you want a better markdown support in the terminal output, run `pip install rich`
+  - If you want better markdown support in the terminal output, run `pip install rich`
 
 
 ## Usage
 
-You can specify the model and system prompt (via text or text filepath) to use via command lines for the following three scripts.
+You can specify the model and system prompt (via text or text filepath) to use via command lines for the following four scripts.
 
 #### Claude Models
 
@@ -33,6 +39,13 @@ python nanocode_claude.py
 ```bash
 export OPENAI_API_KEY=your-key
 python nanocode_openai.py
+```
+
+#### Gemini Models
+
+```bash
+export GEMINI_API_KEY=your-key
+python nanocode_gemini.py
 ```
 
 #### Open-weight models via vLLM
