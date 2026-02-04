@@ -29,6 +29,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -47,6 +48,10 @@ BLUE, CYAN, GREEN, YELLOW, RED = (
     "\033[33m",
     "\033[31m",
 )
+
+# OAuth2 credentials
+OAUTH2_SCOPES = ["https://www.googleapis.com/auth/generative-language.retriever"]
+OAUTH2_CREDENTIALS_FILE = "token.json"
 
 # --- time helpers ---
 
@@ -88,7 +93,7 @@ def write(args):
 def write_preview(args):
     print(f"\n{GREEN}⏺ write{RESET}({DIM}path={args["path"]},")
     tool_preview_file_content("content", args["content"])
-    print("{RESET}\n  )")
+    print(f"{RESET}\n  )")
 
 def edit(args):
     text = open(args["path"]).read()
@@ -109,9 +114,9 @@ def edit_preview(args):
     print(",\n")
     tool_preview_file_content("new", args["new"])
     if args.get("all"):
-        print(",\n    all=true{RESET}\n  )")
+        print(f",\n    all=true{RESET}\n  )")
     else:
-        print("{RESET}\n  )")
+        print(f"{RESET}\n  )")
 
 def glob(args):
     pattern = (args.get("path", ".") + "/" + args["pat"]).replace("//", "/")
@@ -363,22 +368,60 @@ def gemini_api_key() -> str:
         or ""
     )
 
+def gemini_get_oauth2_credentials() -> Credentials:
+    try:
+        import google.auth
+        from google.auth.transport.requests import Request
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        from google.oauth2.credentials import Credentials
+
+        creds: None|Credentials = None
+        if os.path.exists(OAUTH2_CREDENTIALS_FILE):
+            creds = Credentials.from_authorized_user_file(OAUTH2_CREDENTIALS_FILE, OAUTH2_SCOPES)
+        if not creds or not creds.valid:
+            if creds and creds.expired:
+                creds.refresh(Request())
+            else:
+                if not os.path.exists("client_secrets.json"):
+                    raise RuntimeError(f"Credentials in {OAUTH2_CREDENTIALS_FILE} are not valid and client_secret.json does not exist. Please read readme for more details.")
+                creds = InstalledAppFlow.from_client_secrets_file("client_secrets.json", OAUTH2_SCOPES).run_local_server()
+            with open(OAUTH2_CREDENTIALS_FILE, "w") as token:
+                token.write(creds.to_json())
+        return creds
+    except ImportError:
+        raise RuntimeError("Missing google-auth and google-auth-oauthlib libraries. Cannot login via OAuth2")
+
 def gemini_generate_content(
     contents: List[Dict[str, Any]],
     system_prompt: str,
     model: str,
     max_output_tokens: int = 8192,
     tool_mode: str = "auto",
+    auth_mode: str = "key",
 ) -> Dict[str, Any]:
     """
     Calls:
       POST https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=...
     """
-    key = gemini_api_key()
-    if not key:
-        raise RuntimeError("Missing API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY).")
+    url = ""
+    headers = None 
+    if auth_mode == "key":
+        key = gemini_api_key()
+        if not key:
+            raise RuntimeError("Missing API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY).")
 
-    url = f"{API_BASE}/models/{model}:generateContent?key={urllib.parse.quote(key)}"
+        url = f"{API_BASE}/models/{model}:generateContent?key={urllib.parse.quote(key)}"
+        headers = {"Content-Type": "application/json"}
+    elif auth_mode == "oauth2":
+        creds = gemini_get_oauth2_credentials()
+        url = f"{API_BASE}/models/{model}:generateContent"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {creds.token}"
+        }
+    else:
+        raise RuntimeError("Invalid authentication method specified.")
+
     body = {
         "system_instruction": {"parts": {"text": system_prompt}},
         "contents": contents,
@@ -386,11 +429,10 @@ def gemini_generate_content(
         "tools": [{"function_declarations": make_function_declarations()}],
         "tool_config": {"function_calling_config": {"mode": tool_mode}},
     }
-
     req = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
 
@@ -509,16 +551,42 @@ def parse_args():
         "--safe_tools",
         default="dangerous",
         choices=["none", "safe", "sensitive", "dangerous"],
-        help="Which tools AI can call automatically: none, safe, sensitive, dangerous (default)."
+        help="Which tools AI can call automatically: none, safe, sensitive, dangerous (default).",
+    )
+    p.add_argument(
+        "--auth_mode",
+        default="key",
+        choices=["key", "oauth2"],
+        help="Select authentication method, API key is simple, but have lower limits for a free tier: key (default), oauth2.",
     )
     return p.parse_args()
 
+def adjust_oauth2_token_path():
+    global OAUTH2_CREDENTIALS_FILE
+    if "/" in OAUTH2_CREDENTIALS_FILE or "\\" in OAUTH2_CREDENTIALS_FILE:
+        return
+
+    base = ""
+    if sys.platform.startswith("linux"):
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    elif sys.platform == "win32":
+        base = os.environ.get("APPDATA")
+
+    if base:
+        app_config_dir = os.path.join(base, "nanocode")
+        ensure_dir(app_config_dir)
+        OAUTH2_CREDENTIALS_FILE = os.path.join(app_config_dir, OAUTH2_CREDENTIALS_FILE)
+
 def main():
+    adjust_oauth2_token_path()
     args = parse_args()
     model = args.model
     max_output_tokens = int(args.max_output_tokens)
     tool_mode = args.tool_mode
     safe_tools = args.safe_tools
+    auth_mode=args.auth_mode
 
     system_prompt = args.system if args.system is not None else f"Concise coding assistant. cwd: {os.getcwd()}"
     if args.system_file:
@@ -561,6 +629,7 @@ def main():
                     model=model,
                     max_output_tokens=max_output_tokens,
                     tool_mode=tool_mode,
+                    auth_mode=auth_mode
                 )
 
                 if args.save_full_api_response:
