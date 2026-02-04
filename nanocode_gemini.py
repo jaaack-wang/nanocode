@@ -460,7 +460,7 @@ def main():
             print(separator())
             if not user_input:
                 continue
-            if user_input in ("/q", "exit"):
+            if user_input in ("/q", "/quit", "quit", "/exit", "exit"):
                 break
             if user_input == "/c":
                 contents = []
