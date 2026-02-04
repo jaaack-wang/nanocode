@@ -292,26 +292,26 @@ TOOLS = {
     ),
 }
 
-def is_tool_safe_to_call(tool, args, allowed: str):
+def is_tool_safe_to_call(tool, args, allowed: str) -> (bool, str):
     """
     Check if tool is safe to call without confirmation.
     If not ask user to verify tool call.
     """
     if allowed == "dangerous":
-        return True
+        return (True, "")
     elif allowed == "sensitive" and (tool[4] == "sensitive" or tool[4] == "safe"):
-        return True
+        return (True, "")
     elif allowed == "safe" and tool[4] == "safe":
-        return True
+        return (True, "")
     else:
         while True:
-            user_input = input(f"Run tool (Yes/no): ").lower().strip()
-            if user_input in ["yes", "y", ""]: # Default option
-                return True
+            user_input = input(f"Run tool (Yes/no/<reason>): ").lower().strip()
+            if user_input in ["yes", "y", ""]:  # Default option
+                return (True, "")
             elif user_input in ["no", "n"]:
-                return False
+                return (False, "User rejected tool invocation.")
             else:
-                print("Invalid input. Please answer 'yes' or 'no'.")
+                return (False, f"User rejected tool invocation with message: {user_input}")
 
 def run_tool(name, args, safe_tools):
     """
@@ -319,10 +319,11 @@ def run_tool(name, args, safe_tools):
     """
     try:
         TOOLS[name][3](args)
-        if is_tool_safe_to_call(TOOLS[name], args, safe_tools):
+        (safe, reason) = is_tool_safe_to_call(TOOLS[name], args, safe_tools)
+        if safe:
             return TOOLS[name][2](args)
         else:
-            return "User rejected tool invocation."
+            return reason
     except Exception as err:
         return f"error: {err}"
 
