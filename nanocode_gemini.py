@@ -261,9 +261,7 @@ def make_function_declarations():
             base_type = param_type.rstrip("?")
             # Map the "number" from your script into JSON Schema-ish "number"
             # (Gemini examples commonly use "number" for numeric params)
-            json_type = "number" if base_type == "number" else base_type
-            if json_type == "integer":
-                json_type = "number"
+            json_type = "number" if base_type == "integer" else base_type
             properties[param_name] = {"type": json_type}
             if not is_optional:
                 required.append(param_name)
