@@ -65,10 +65,10 @@ For project ID you may use your own (described below or [here](https://geminicli
 
 This is based on [rclone's "tutorial"](https://rclone.org/drive/#making-your-own-client-id).
 
-1. Login into [Google Cloud Console](https://console.developers.google.com/)
+1. Log in into [Google Cloud Console](https://console.developers.google.com/)
 2. Select a project or create a new project.
 3. Click "Credentials" in the left-side panel.
-4. Configure "Oauth Consent Screen".
+4. Configure the "Oauth Consent Screen".
 5. Go back to Overview and click "Create OAuth client" (top right corner), then continue via guided configuration.
 6. Select "Create OAuth client", select "Desktop App", and finish guided configuration.
 7. You now see client ID and client secret. You can download json here or just fill in details in an example given below.
