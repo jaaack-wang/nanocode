@@ -435,6 +435,7 @@ def main():
     model = args.model
     session_timestamp = now_iso()
     max_tokens = args.max_tokens
+    safe_tools = args.safe_tools
     system_prompt = args.system if args.system is not None else f"Concise coding assistant. cwd: {os.getcwd()}"
     print(f"{BOLD}nanocode{RESET} | {DIM}{model} | {os.getcwd()}{RESET}\n")
 
