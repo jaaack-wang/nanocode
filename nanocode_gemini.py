@@ -280,7 +280,7 @@ TOOLS = {
         "sensitive",
     ),
     "grep": (
-        "Search files for regex pattern. 'path' can change execution directory.",
+        "Search files for regex pattern. 'path' can change search base directory.",
         {"pat": "string", "path": "string?"},
         grep,
         tool_preview_args("grep"),
