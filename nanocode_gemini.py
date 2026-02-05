@@ -10,7 +10,8 @@ Key features:
   --system PROMPT (or --system-file PATH)
   --not_save_history  (do not write JSON to chat_history/<model>/<timestamp>.json)
   --save_full_api_response (optional transparency/debug)
-  --safe_tools safe|sensitive|dangerous (control what tools AI can run without confirmation) 
+  --safe_tools safe|sensitive|dangerous (control what tools AI can run without confirmation)
+  --auth_mode key|oauth2|code_assist
 
 Auth:
   export GEMINI_API_KEY="..."   (preferred)
@@ -30,14 +31,23 @@ import os
 import re
 import subprocess
 import sys
+import uuid
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
-# Gemini REST endpoint (v1beta)
-API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+# Default model
 DEFAULT_MODEL = "gemini-3-flash-preview"
+# Gemini REST endpoint (v1beta)
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+# Gemini code_assist REST endpoint (v1internal)
+CODE_ASSIST_API_BASE = "https://cloudcode-pa.googleapis.com/v1internal"
+# OAuth2 credentials
+GEMINI_OAUTH2_SCOPES = ["https://www.googleapis.com/auth/generative-language.retriever"]
+CODE_ASSIST_OAUTH2_SCOPES = ["https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile", "openid"]
+OAUTH2_CREDENTIALS_FILE = "token.json"
 
 # ANSI colors
 RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
@@ -48,10 +58,6 @@ BLUE, CYAN, GREEN, YELLOW, RED = (
     "\033[33m",
     "\033[31m",
 )
-
-# OAuth2 credentials
-OAUTH2_SCOPES = ["https://www.googleapis.com/auth/generative-language.retriever"]
-OAUTH2_CREDENTIALS_FILE = "token.json"
 
 # Commands that are considered sensitive, not dangerous
 SENSITIVE_COMMANDS = [
@@ -267,7 +273,7 @@ TOOLS = {
         "dangerous",
     ),
     "glob": (
-        "Find files by pattern, sorted by mtime. 'path' can change execution directory.",
+        "Find files by pattern, sorted by mtime. 'path' can change search base directory.",
         {"pat": "string", "path": "string?"},
         glob,
         tool_preview_args("glob"),
@@ -384,7 +390,7 @@ def gemini_api_key() -> str:
         or ""
     )
 
-def gemini_get_oauth2_credentials() -> Credentials:
+def gemini_get_oauth2_credentials(scopes):
     try:
         import google.auth
         from google.auth.transport.requests import Request
@@ -393,21 +399,60 @@ def gemini_get_oauth2_credentials() -> Credentials:
 
         creds: None|Credentials = None
         if os.path.exists(OAUTH2_CREDENTIALS_FILE):
-            creds = Credentials.from_authorized_user_file(OAUTH2_CREDENTIALS_FILE, OAUTH2_SCOPES)
+            creds = Credentials.from_authorized_user_file(OAUTH2_CREDENTIALS_FILE, scopes)
         if not creds or not creds.valid:
             if creds and creds.expired:
                 creds.refresh(Request())
             else:
-                if not os.path.exists("client_secrets.json"):
+                if not os.path.exists("client_secret.json"):
                     raise RuntimeError(f"Credentials in {OAUTH2_CREDENTIALS_FILE} are not valid and client_secret.json does not exist. Please read readme for more details.")
-                creds = InstalledAppFlow.from_client_secrets_file("client_secrets.json", OAUTH2_SCOPES).run_local_server()
+                creds = InstalledAppFlow.from_client_secrets_file("client_secret.json", scopes).run_local_server()
             with open(OAUTH2_CREDENTIALS_FILE, "w") as token:
                 token.write(creds.to_json())
         return creds
     except ImportError:
         raise RuntimeError("Missing google-auth and google-auth-oauthlib libraries. Cannot login via OAuth2")
 
-def gemini_generate_content(
+def gemini_generate_content_code_assist(
+    contents: List[Dict[str, Any]],
+    system_prompt: str,
+    model: str,
+    max_output_tokens: int = 8192,
+    tool_mode: str = "auto",
+) -> Dict[str, Any]:
+    """
+    Calls:
+      POST https://cloudcode-pa.googleapis.com/v1internal/:generateContent
+    """
+    creds = gemini_get_oauth2_credentials(CODE_ASSIST_OAUTH2_SCOPES)
+    url = f"{CODE_ASSIST_API_BASE}:generateContent"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {creds.token}"
+    }
+    request = {
+        "systemInstruction": {"parts": {"text": system_prompt}},
+        "contents": contents,
+        "generationConfig": {"maxOutputTokens": int(max_output_tokens)},
+        "tools": [{"function_declarations": make_function_declarations()}],
+        "tool_config": {"function_calling_config": {"mode": tool_mode}},
+    }
+    body = {
+        "model": model,
+        "project": os.environ.get("GOOGLE_CLOUD_PROJECT", "cloudshell-gca"),
+        "user_prompt_id": str(uuid.uuid4()),
+        "request": request,
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read().decode("utf-8"))["response"]
+
+def gemini_generate_content_int(
     contents: List[Dict[str, Any]],
     system_prompt: str,
     model: str,
@@ -418,6 +463,8 @@ def gemini_generate_content(
     """
     Calls:
       POST https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=...
+      or
+      POST https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent
     """
     url = ""
     headers = None 
@@ -426,15 +473,23 @@ def gemini_generate_content(
         if not key:
             raise RuntimeError("Missing API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY).")
 
-        url = f"{API_BASE}/models/{model}:generateContent?key={urllib.parse.quote(key)}"
+        url = f"{GEMINI_API_BASE}/models/{model}:generateContent?key={urllib.parse.quote(key)}"
         headers = {"Content-Type": "application/json"}
     elif auth_mode == "oauth2":
-        creds = gemini_get_oauth2_credentials()
-        url = f"{API_BASE}/models/{model}:generateContent"
+        creds = gemini_get_oauth2_credentials(GEMINI_OAUTH2_SCOPES)
+        url = f"{GEMINI_API_BASE}/models/{model}:generateContent"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {creds.token}"
         }
+    elif auth_mode == "code_assist":
+        return gemini_generate_content_code_assist(
+            contents,
+            system_prompt,
+            model,
+            max_output_tokens,
+            tool_mode
+        )
     else:
         raise RuntimeError("Invalid authentication method specified.")
 
@@ -454,6 +509,51 @@ def gemini_generate_content(
 
     with urllib.request.urlopen(req, timeout=60) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+def gemini_generate_content(
+    contents: List[Dict[str, Any]],
+    system_prompt: str,
+    model: str,
+    max_output_tokens: int = 8192,
+    tool_mode: str = "auto",
+    auth_mode: str = "key",
+) -> Dict[str, Any]:
+    """
+    Wrapper to allow retries
+    """
+    ret = []
+    try:
+        return gemini_generate_content_int(
+            contents,
+            system_prompt,
+            model,
+            max_output_tokens,
+            tool_mode,
+            auth_mode
+        )
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            error = json.loads(e.read().decode("utf-8")).get("error", {})
+            timeout = float(5)
+
+            for elem in error["details"]:
+                if elem.get("@type", "") == "type.googleapis.com/google.rpc.RetryInfo":
+                    match = re.match(r"(\d+\.?\d*)", elem.get("retryDelay", "5.0"))
+                    if match:
+                        timeout = float(match.group(1))
+                    break
+
+            print(f"\n{YELLOW}⏺ Rate-limited, waiting {timeout}s ({error["message"]}){RESET}")
+            time.sleep(timeout)
+            return gemini_generate_content(
+                contents,
+                system_prompt,
+                model,
+                max_output_tokens,
+                tool_mode,
+                auth_mode
+            )
+        raise
 
 def extract_text_and_function_calls(resp: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
@@ -572,7 +672,7 @@ def parse_args():
     p.add_argument(
         "--auth_mode",
         default="key",
-        choices=["key", "oauth2"],
+        choices=["key", "oauth2", "code_assist"],
         help="Select authentication method, API key is simple, but have lower limits for a free tier: key (default), oauth2.",
     )
     return p.parse_args()
