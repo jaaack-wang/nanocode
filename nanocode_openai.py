@@ -18,6 +18,7 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Any, Dict, List, Optional, Tuple
 
 API_URL = "https://api.openai.com/v1/responses"
 DEFAULT_MODEL = "gpt-5-nano"
@@ -44,6 +45,21 @@ def ts_filename() -> str:
 
 # --- Tool implementations ---
 
+def tool_preview_args(name):
+    def ret(args):
+        args_preview: List[str] = []
+        for k, v in args.items():
+            args_preview.append(f"{k}={str(v)[:50]}")
+        align_paren = "" if len(args_preview) == 1 else "\n  "
+        print(f"\n{GREEN}⏺ {name}{RESET}({DIM}{",\n    ".join(args_preview)}{RESET}{align_paren})")
+
+    return ret
+
+def tool_preview_file_content(arg: str, data: str):
+    print(f"    {arg}=\"\"\"")
+    print("\n".join(f"    {line}" for line in data.splitlines()))
+    print("    \"\"\"", end="")
+
 def read(args):
     lines = open(args["path"]).readlines()
     offset = args.get("offset", 0)
@@ -55,6 +71,11 @@ def write(args):
     with open(args["path"], "w") as f:
         f.write(args["content"])
     return "ok"
+
+def write_preview(args):
+    print(f"\n{GREEN}⏺ write{RESET}({DIM}path={args["path"]},")
+    tool_preview_file_content("content", args["content"])
+    print(f"{RESET}\n  )")
 
 def edit(args):
     text = open(args["path"]).read()
@@ -68,6 +89,16 @@ def edit(args):
     with open(args["path"], "w") as f:
         f.write(replacement)
     return "ok"
+
+def edit_preview(args):
+    print(f"\n{GREEN}⏺ edit{RESET}({DIM}path={args["path"]},")
+    tool_preview_file_content("old", args["old"])
+    print(",\n")
+    tool_preview_file_content("new", args["new"])
+    if args.get("all"):
+        print(f",\n    all=true{RESET}\n  )")
+    else:
+        print(f"{RESET}\n  )")
 
 def glob(args):
     pattern = (args.get("path", ".") + "/" + args["pat"]).replace("//", "/")
@@ -178,60 +209,105 @@ def web_get(args):
     except Exception as e:
         return f"error: {e}"
 
-# --- Tool definitions: (description, schema, function) ---
+# --- Tool definitions: (description, schema, function, preview function, danger level) ---
 
 TOOLS = {
     "read": (
         "Read file with line numbers (file path, not directory)",
         {"path": "string", "offset": "number?", "limit": "number?"},
         read,
+        tool_preview_args("read"),
+        "sensitive",
     ),
     "write": (
         "Write content to file",
         {"path": "string", "content": "string"},
         write,
+        write_preview,
+        "dangerous",
     ),
     "edit": (
         "Replace old with new in file (old must be unique unless all=true)",
         {"path": "string", "old": "string", "new": "string", "all": "boolean?"},
         edit,
+        edit_preview,
+        "dangerous",
     ),
     "glob": (
-        "Find files by pattern, sorted by mtime",
+        "Find files by pattern, sorted by mtime. 'path' can change execution directory.",
         {"pat": "string", "path": "string?"},
         glob,
+        tool_preview_args("glob"),
+        "sensitive",
     ),
     "grep": (
-        "Search files for regex pattern",
+        "Search files for regex pattern. 'path' can change execution directory.",
         {"pat": "string", "path": "string?"},
         grep,
+        tool_preview_args("grep"),
+        "sensitive",
     ),
     "bash": (
         "Run shell command",
         {"cmd": "string"},
         bash,
+        tool_preview_args("bash"),
+        "dangerous",
     ),
     "web_search": (
         "Search the web and return top results as numbered list",
         {"query": "string", "max_results": "integer?"},
         web_search,
+        tool_preview_args("web_search"),
+        "safe",
     ),
     "web_get": (
         "Fetch a webpage and return plain text (roughly extracted)",
         {"url": "string", "max_chars": "integer?"},
         web_get,
+        tool_preview_args("web_get"),
+        "safe",
     ),
 }
 
-def run_tool(name, args):
+def is_tool_safe_to_call(tool, args, allowed: str) -> (bool, str):
+    """
+    Check if tool is safe to call without confirmation.
+    If not ask user to verify tool call.
+    """
+    if allowed == "dangerous":
+        return (True, "")
+    elif allowed == "sensitive" and (tool[4] == "sensitive" or tool[4] == "safe"):
+        return (True, "")
+    elif allowed == "safe" and tool[4] == "safe":
+        return (True, "")
+    else:
+        while True:
+            user_input = input(f"Run tool (Yes/no/<reason>): ").lower().strip()
+            if user_input in ["yes", "y", ""]:  # Default option
+                return (True, "")
+            elif user_input in ["no", "n"]:
+                return (False, "User rejected tool invocation.")
+            else:
+                return (False, f"User rejected tool invocation with message: {user_input}")
+
+def run_tool(name, args, safe_tools):
+    """
+    Run tool and ask user for confirmation if needed.
+    """
     try:
-        return TOOLS[name][2](args)
+        TOOLS[name][3](args)
+        (safe, reason) = is_tool_safe_to_call(TOOLS[name], args, safe_tools)
+        if safe:
+            return TOOLS[name][2](args)
+        else:
+            return reason
     except Exception as err:
         return f"error: {err}"
 
 def make_schema():
     result = []
-    for name, (description, params, _fn) in TOOLS.items():
+    for name, (description, params, _fn, _preview_fn, _safety) in TOOLS.items():
         properties = {}
         required = []
         for param_name, param_type in params.items():
@@ -346,6 +422,12 @@ def parse_args():
         action="store_true",
         help="Save the whole API response object into chat history for transparency.",
     )
+    p.add_argument(
+        "--safe_tools",
+        default="dangerous",
+        choices=["none", "safe", "sensitive", "dangerous"],
+        help="Which tools AI can call automatically: none, safe, sensitive, dangerous (default).",
+    )
     return p.parse_args()
 
 def main():
@@ -353,6 +435,7 @@ def main():
     model = args.model
     max_output_tokens = args.max_output_tokens
     system_prompt = args.system if args.system is not None else f"Concise coding assistant. cwd: {os.getcwd()}"
+    safe_tools = args.safe_tools
     
     if args.system_file:
         system_prompt = open(args.system_file, "r", encoding="utf-8").read()
@@ -402,8 +485,6 @@ def main():
                         tool_name = item["name"]
                         tool_args = json.loads(item["arguments"])
                         arg_preview = str(list(tool_args.values())[0])[:50] if tool_args else ""
-                        print(f"\n{GREEN}⏺ {tool_name.capitalize()}{RESET}({DIM}{arg_preview}{RESET})")
-
                         result = run_tool(tool_name, tool_args)
                         log_event("tool", name=tool_name, arguments=tool_args, output=result)
 

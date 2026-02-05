@@ -57,6 +57,22 @@ def ts_filename() -> str:
 
 
 # ---------- Tools ----------
+
+def tool_preview_args(name):
+    def ret(args):
+        args_preview: List[str] = []
+        for k, v in args.items():
+            args_preview.append(f"{k}={str(v)[:50]}")
+        align_paren = "" if len(args_preview) == 1 else "\n  "
+        print(f"\n{GREEN}⏺ {name}{RESET}({DIM}{",\n    ".join(args_preview)}{RESET}{align_paren})")
+
+    return ret
+
+def tool_preview_file_content(arg: str, data: str):
+    print(f"    {arg}=\"\"\"")
+    print("\n".join(f"    {line}" for line in data.splitlines()))
+    print("    \"\"\"", end="")
+
 def read(args: Dict[str, Any]) -> str:
     lines = open(args["path"]).readlines()
     offset = int(args.get("offset", 0))
@@ -71,6 +87,11 @@ def write(args: Dict[str, Any]) -> str:
     return "ok"
 
 
+def write_preview(args):
+    print(f"\n{GREEN}⏺ write{RESET}({DIM}path={args['path']},")
+    tool_preview_file_content("content", args["content"])
+    print(f"{RESET}\n  )")
+
 def edit(args: Dict[str, Any]) -> str:
     text = open(args["path"]).read()
     old, new = args["old"], args["new"]
@@ -84,6 +105,15 @@ def edit(args: Dict[str, Any]) -> str:
         f.write(replacement)
     return "ok"
 
+def edit_preview(args):
+    print(f"\n{GREEN}⏺ edit{RESET}({DIM}path={args['path']},")
+    tool_preview_file_content("old", args["old"])
+    print(",\n")
+    tool_preview_file_content("new", args["new"])
+    if args.get("all"):
+        print(f",\n    all=true{RESET}\n  )")
+    else:
+        print(f"{RESET}\n  )")
 
 def glob(args: Dict[str, Any]) -> str:
     pattern = (args.get("path", ".") + "/" + args["pat"]).replace("//", "/")
@@ -198,54 +228,101 @@ def web_get(args):
     except Exception as e:
         return f"error: {e}"
 
-# --- Tool definitions: (description, schema, function) ---
+# --- Tool definitions: (description, schema, function, preview function, danger level) ---
 
 TOOLS = {
     "read": (
         "Read file with line numbers (file path, not directory)",
         {"path": "string", "offset": "number?", "limit": "number?"},
         read,
+        tool_preview_args("read"),
+        "sensitive",
     ),
     "write": (
         "Write content to file",
         {"path": "string", "content": "string"},
         write,
+        write_preview,
+        "dangerous",
     ),
     "edit": (
         "Replace old with new in file (old must be unique unless all=true)",
         {"path": "string", "old": "string", "new": "string", "all": "boolean?"},
         edit,
+        edit_preview,
+        "dangerous",
     ),
     "glob": (
-        "Find files by pattern, sorted by mtime",
+        "Find files by pattern, sorted by mtime. 'path' can change execution directory.",
         {"pat": "string", "path": "string?"},
         glob,
+        tool_preview_args("glob"),
+        "sensitive",
     ),
     "grep": (
-        "Search files for regex pattern",
+        "Search files for regex pattern. 'path' can change execution directory.",
         {"pat": "string", "path": "string?"},
         grep,
+        tool_preview_args("grep"),
+        "sensitive",
     ),
     "bash": (
         "Run shell command",
         {"cmd": "string"},
         bash,
+        tool_preview_args("bash"),
+        "dangerous",
     ),
     "web_search": (
         "Search the web and return top results as numbered list",
         {"query": "string", "max_results": "integer?"},
         web_search,
+        tool_preview_args("web_search"),
+        "safe",
     ),
     "web_get": (
         "Fetch a webpage and return plain text (roughly extracted)",
         {"url": "string", "max_chars": "integer?"},
         web_get,
+        tool_preview_args("web_get"),
+        "safe",
     ),
 }
 
-def run_tool(name: str, args: Dict[str, Any]) -> str:
+
+def is_tool_safe_to_call(tool, args, allowed: str) -> (bool, str):
+    """
+    Check if tool is safe to call without confirmation.
+    If not ask user to verify tool call.
+    """
+    if allowed == "dangerous":
+        return (True, "")
+    elif allowed == "sensitive" and (tool[4] == "sensitive" or tool[4] == "safe"):
+        return (True, "")
+    elif allowed == "safe" and tool[4] == "safe":
+        return (True, "")
+    else:
+        while True:
+            user_input = input(f"Run tool (Yes/no/<reason>): ").lower().strip()
+            if user_input in ["yes", "y", ""]:  # Default option
+                return (True, "")
+            elif user_input in ["no", "n"]:
+                return (False, "User rejected tool invocation.")
+            else:
+                return (False, f"User rejected tool invocation with message: {user_input}")
+
+
+def run_tool(name, args, safe_tools):
+    """
+    Run tool and ask user for confirmation if needed.
+    """
     try:
-        return TOOLS[name][2](args)
+        TOOLS[name][3](args)
+        (safe, reason) = is_tool_safe_to_call(TOOLS[name], args, safe_tools)
+        if safe:
+            return TOOLS[name][2](args)
+        else:
+            return reason
     except Exception as err:
         return f"error: {err}"
 
@@ -422,11 +499,18 @@ def parse_args():
         action="store_true",
         help="Save the whole API response object into chat history for transparency.",
     )
+    p.add_argument(
+        "--safe_tools",
+        default="dangerous",
+        choices=["none", "safe", "sensitive", "dangerous"],
+        help="Which tools AI can call automatically: none, safe, sensitive, dangerous (default).",
+    )
     return p.parse_args()
 
 # ---------- Main ----------
 def main() -> None:
     args = parse_args()
+    safe_tools = args.safe_tools
     print(f"{BOLD}nanocode_vllm{RESET} | {DIM}{MODEL}{RESET} | {BASE_URL}\n")
 
     messages: List[dict] = []
@@ -509,9 +593,6 @@ def main() -> None:
                         tool_args = json.loads(fn.get("arguments") or "{}")
                     except Exception:
                         tool_args = {}
-
-                    arg_preview = str(list(tool_args.values())[0])[:50] if tool_args else ""
-                    print(f"\n{GREEN}⏺ {tool_name.capitalize()}{RESET}({DIM}{arg_preview}{RESET})")
 
                     result = run_tool(tool_name, tool_args)
                     log_event("tool", name=tool_name, arguments=tool_args, output=result)
